@@ -1,0 +1,10 @@
+server:
+  port: 8082
+
+spring:
+  application:
+    name: payment-service
+
+rootlens:
+  ingestion:
+    url: ""  # Set to http://ingestion-service:8080 when ingestion service is running

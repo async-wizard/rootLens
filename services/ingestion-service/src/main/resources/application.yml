@@ -1,0 +1,47 @@
+server:
+  port: 8085
+
+spring:
+  application:
+    name: ingestion-service
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      acks: 1
+      retries: 3
+      properties:
+        spring.json.add.type.headers: false
+        retry.backoff.ms: 500
+        linger.ms: 5
+    admin:
+      fail-fast: false
+
+rootlens:
+  kafka:
+    topics:
+      logs: logs-topic
+      traces: traces-topic
+      metrics: metrics-topic
+      events: events-topic
+
+resilience4j:
+  ratelimiter:
+    instances:
+      ingestion:
+        limit-for-period: 1000
+        limit-refresh-period: 1s
+        timeout-duration: 0s
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    health:
+      show-details: always
+  metrics:
+    tags:
+      service: ${spring.application.name}

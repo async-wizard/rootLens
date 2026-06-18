@@ -1,0 +1,78 @@
+server:
+  port: 8083
+
+spring:
+  application:
+    name: incident-engine
+
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    consumer:
+      group-id: incident-engine-group
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      properties:
+        spring.json.value.default.type: com.rootlens.incidentengine.model.EnrichedEvent
+        spring.json.trusted.packages: com.rootlens.incidentengine.model
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      acks: 1
+      retries: 3
+      properties:
+        spring.json.add.type.headers: false
+        retry.backoff.ms: 500
+        linger.ms: 5
+    admin:
+      fail-fast: false
+
+  datasource:
+    url: jdbc:postgresql://${POSTGRES_HOST:localhost}:5432/rootlens
+    username: ${POSTGRES_USER:admin}
+    password: ${POSTGRES_PASSWORD:admin}
+    driver-class-name: org.postgresql.Driver
+
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    show-sql: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    table: flyway_history_incident_engine
+
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6380}
+
+rootlens:
+  kafka:
+    topics:
+      logs: logs-topic
+      traces: traces-topic
+      metrics: metrics-topic
+      incidents: incidents-topic
+      alerts: alerts-topic
+  incident:
+    dedup-ttl-seconds: 300
+    trace-ttl-seconds: 600
+  alert:
+    webhook-url: ""  # Set via ROOTLENS_ALERT_WEBHOOK_URL — accepts Slack/Teams/custom incoming webhook URL
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    health:
+      show-details: always
+  metrics:
+    tags:
+      service: ${spring.application.name}

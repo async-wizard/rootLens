@@ -1,0 +1,18 @@
+server:
+  port: 8081
+
+spring:
+  application:
+    name: checkout-service
+
+services:
+  payment:
+    url: http://localhost:8082  # Overridden to http://payment-service:8082 via env in docker-compose
+
+rootlens:
+  ingestion:
+    url: ""  # Set to http://ingestion-service:8085 when ingestion service is running
+  simulation:
+    auto-trigger:
+      enabled: false          # override to true via ROOTLENS_SIMULATION_AUTO_TRIGGER_ENABLED in docker-compose
+      interval-ms: 30000

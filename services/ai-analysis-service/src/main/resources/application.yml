@@ -1,0 +1,105 @@
+server:
+  port: 8084
+
+spring:
+  application:
+    name: ai-analysis-service
+
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    consumer:
+      group-id: ai-analysis-group
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      properties:
+        spring.json.value.default.type: com.rootlens.aianalysis.model.IncidentEvent
+        spring.json.trusted.packages: com.rootlens.aianalysis.model
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      acks: 1
+      retries: 3
+      properties:
+        spring.json.add.type.headers: false
+        retry.backoff.ms: 500
+        linger.ms: 5
+    admin:
+      fail-fast: false
+
+  datasource:
+    url: jdbc:postgresql://${POSTGRES_HOST:localhost}:5432/rootlens
+    username: ${POSTGRES_USER:admin}
+    password: ${POSTGRES_PASSWORD:admin}
+    driver-class-name: org.postgresql.Driver
+
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    show-sql: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    table: flyway_history_ai_analysis
+
+# ── Claude (Anthropic) ─────────────────────────────────────────────────────────
+anthropic:
+  model: claude-sonnet-4-6
+  max-tokens: 1024
+
+# ── LLM Provider Selection ─────────────────────────────────────────────────────
+rootlens:
+  ai:
+    provider: ${AI_PROVIDER:claude}   # claude | deepseek | groq | openrouter
+
+    deepseek:
+      api-key: ${DEEPSEEK_API_KEY:}
+      base-url: https://api.deepseek.com/v1
+      model: deepseek-chat
+      max-tokens: 1024
+
+    groq:
+      api-key: ${GROQ_API_KEY:}
+      base-url: https://api.groq.com/openai/v1
+      model: llama-3.3-70b-versatile
+      max-tokens: 1024
+
+    openrouter:
+      api-key: ${OPENROUTER_API_KEY:}
+      base-url: https://openrouter.ai/api/v1
+      model: meta-llama/llama-3.1-8b-instruct:free
+      max-tokens: 1024
+
+  kafka:
+    topics:
+      incidents: incidents-topic
+      ai-analysis: ai-analysis-topic
+
+resilience4j:
+  circuitbreaker:
+    instances:
+      llm-provider:
+        sliding-window-size: 10
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 30s
+        permitted-number-of-calls-in-half-open-state: 3
+  timelimiter:
+    instances:
+      llm-provider:
+        timeout-duration: 30s
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    health:
+      show-details: always
+  metrics:
+    tags:
+      service: ${spring.application.name}
