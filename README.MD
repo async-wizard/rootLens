@@ -1,36 +1,38 @@
-# RootLens
+# rootLens
 
-AI-powered observability and root cause analysis platform for distributed systems.
+> AI-powered observability platform — distributed trace correlation, LLM root cause analysis, real-time incident dashboard.
 
-RootLens ingests logs, traces, and metrics from microservices, correlates related events into incidents using distributed trace IDs, and generates AI root cause analysis via pluggable LLM providers (Groq, Claude, DeepSeek, OpenRouter). Results are served through a real-time React dashboard.
+![CI](https://github.com/async-wizard/rootLens/actions/workflows/ci.yml/badge.svg)
+![Java](https://img.shields.io/badge/Java-17-orange?logo=openjdk)
+![Spring Boot](https://img.shields.io/badge/Spring%20Boot-4.x-brightgreen?logo=springboot)
+![React](https://img.shields.io/badge/React-19-61DAFB?logo=react)
+![Kafka](https://img.shields.io/badge/Apache%20Kafka-KRaft-231F20?logo=apachekafka)
+![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker)
+
+rootLens ingests logs, traces, and metrics from microservices, automatically correlates related errors into incidents using distributed trace IDs, and generates AI root cause analysis via pluggable LLM providers (Groq, Claude, DeepSeek). Results stream to a real-time React dashboard via SSE push.
 
 ---
 
 ## Table of Contents
 
 1. [Quick Start](#quick-start)
-2. [High Level Design](#high-level-design)
-3. [Low Level Design](#low-level-design)
-4. [Kafka Topics](#kafka-topics)
-5. [Database Schema](#database-schema)
-6. [REST API Reference](#rest-api-reference)
-7. [LLM Provider Configuration](#llm-provider-configuration)
-8. [Generating Incidents](#generating-incidents)
+2. [Architecture](#architecture)
+3. [Data Flow](#data-flow)
+4. [Low Level Design](#low-level-design)
+5. [Kafka Topics](#kafka-topics)
+6. [Database Schema](#database-schema)
+7. [REST API Reference](#rest-api-reference)
+8. [LLM Provider Configuration](#llm-provider-configuration)
+9. [Generating Incidents](#generating-incidents)
 
 ---
 
 ## Quick Start
 
-### Prerequisites
-- Docker + Docker Compose
-- Java 17 (for local builds)
-- Node.js 18+ (for the frontend)
-- A free LLM API key — [Groq](https://console.groq.com) is easiest (no credit card)
-
-### Run the stack
+**Prerequisites:** Docker + Docker Compose · Java 17 · Node.js 18+ · A free [Groq API key](https://console.groq.com) (no credit card)
 
 ```bash
-# 1. Export your LLM credentials (Groq example)
+# 1. Export your LLM credentials
 export GROQ_API_KEY=your-key-here
 export AI_PROVIDER=groq
 
@@ -38,154 +40,145 @@ export AI_PROVIDER=groq
 cd infra
 docker compose up -d
 
-# 3. Start the frontend dev server
+# 3. Start the frontend
 cd ../frontend
-npm install
-npm run dev
+npm install && npm run dev
 ```
 
 | Interface | URL |
 |---|---|
 | React Dashboard | http://localhost:5173 |
-| Dashboard REST API | http://localhost:8086 |
+| Dashboard REST API + Swagger | http://localhost:8086/swagger-ui.html |
 | Kafka UI | http://localhost:8080 |
 | Jaeger Traces | http://localhost:16686 |
-
-### Generate incidents
+| Grafana | http://localhost:3000 |
+| Prometheus | http://localhost:9090 |
 
 ```bash
-# Trigger 10 checkout requests (some will fail and create incidents)
+# Generate incidents (checkout auto-triggers every 30s in Docker, or manually:)
 for i in {1..10}; do curl -s http://localhost:8081/checkout; done
 ```
 
-The dashboard auto-polls every 30 seconds. New incidents appear with AI analysis within ~5 seconds of generation.
+Incidents appear on the dashboard within **<2 seconds** of generation via SSE push. AI analysis follows within **~10 seconds**.
 
 ---
 
-## High Level Design
+## Architecture
 
-### Architecture Overview
+```mermaid
+flowchart TD
+    subgraph SIM["🎭 Simulation Layer"]
+        CS["checkout-service\n:8081"]
+        PS["payment-service\n:8082\n5 failure scenarios"]
+        CS -->|"HTTP · OTel instrumented"| PS
+    end
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                        Simulation Layer                              │
-│                                                                      │
-│   ┌──────────────────┐        ┌──────────────────┐                  │
-│   │  checkout-service│──────► │  payment-service  │                  │
-│   │     :8081        │  HTTP  │      :8082        │                  │
-│   └────────┬─────────┘        └────────┬──────────┘                 │
-│            │  LogForwarder              │  LogForwarder              │
-└────────────┼───────────────────────────┼────────────────────────────┘
-             │ POST /logs                │ POST /logs
-             ▼                           ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                        Ingestion Layer                               │
-│                                                                      │
-│          ┌──────────────────────────────────┐                        │
-│          │        ingestion-service          │                        │
-│          │             :8085                 │                        │
-│          │  /logs  /metrics  /traces /events │                        │
-│          └──────────────────┬───────────────┘                        │
-└─────────────────────────────┼───────────────────────────────────────┘
-                              │ Publishes EnrichedEvent
-                              ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                         Kafka (KRaft, :9092)                         │
-│                                                                      │
-│   logs-topic ──────────────────────────────────────────────────┐    │
-│   metrics-topic ───────────────────────────────────────────────┤    │
-│   traces-topic ────────────────────────────────────────────────┘    │
-│                                                                      │
-│   incidents-topic ──────────────────────────────────────────────┐   │
-│   alerts-topic  (future alerting consumers)                      │   │
-│   ai-analysis-topic (future downstream consumers)                │   │
-└──────────────────────────────────────────────────────────────────┼──┘
-          │ (logs/metrics/traces-topic)                            │
-          ▼                                                         │
-┌──────────────────────────────┐                                   │
-│      incident-engine         │                                   │
-│           :8083              │                                   │
-│  • Correlation by traceId   │                                   │
-│  • Deduplication via Redis  │──► incidents-topic                │
-│  • Incident lifecycle mgmt  │                                   │
-└──────────────────────────────┘                                   │
-          │                                                         │ (incidents-topic)
-          │                                                         ▼
-          │                                          ┌──────────────────────────────┐
-          │                                          │    ai-analysis-service       │
-          │                                          │          :8084               │
-          │                                          │  • Context aggregation       │
-          │                                          │  • Prompt engineering        │
-          │                                          │  • LLM provider strategy     │
-          │                                          │  (Groq / Claude / DeepSeek)  │
-          │                                          └──────────────┬───────────────┘
-          │                                                         │
-          ▼                                                         ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                          Storage Layer                               │
-│                                                                      │
-│          PostgreSQL :5432                Redis :6379                 │
-│   ┌────────────────────┐        ┌───────────────────────┐           │
-│   │ incidents          │        │ traceId → incidentId  │           │
-│   │ incident_events    │        │ (correlation cache)   │           │
-│   │ ai_analysis        │        └───────────────────────┘           │
-│   └────────────────────┘                                            │
-└─────────────────────────────────────────────────────────────────────┘
-          │
-          ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                       Presentation Layer                             │
-│                                                                      │
-│   ┌──────────────────────┐      ┌─────────────────────────────┐     │
-│   │   dashboard-backend  │      │       React Frontend         │     │
-│   │        :8086         │◄─────│          :5173               │     │
-│   │  REST API + caching  │      │  Incidents / Detail /        │     │
-│   └──────────────────────┘      │  Services pages              │     │
-│                                 └─────────────────────────────┘     │
-└─────────────────────────────────────────────────────────────────────┘
+    subgraph ING["📥 Ingestion Layer"]
+        IS["ingestion-service :8085\n/logs  /metrics  /traces  /events\nRate-limited · 1,000 req/s"]
+    end
+
+    subgraph BUS["⚡ Kafka KRaft :9092"]
+        direction LR
+        LT(logs-topic)
+        MT(metrics-topic)
+        TT(traces-topic)
+        IT(incidents-topic)
+    end
+
+    subgraph PROC["⚙️ Processing Layer"]
+        IE["incident-engine :8083\nTrace correlation by traceId\nRedis dedup · 5-min TTL\nFSM · OPEN → INVESTIGATING → RESOLVED"]
+        AI["ai-analysis-service :8084\nContext aggregation\nPrompt engineering\nLLM strategy pattern"]
+    end
+
+    subgraph STORE["🗄️ Storage"]
+        PG[("PostgreSQL :5432\nincidents\nincident_events\nai_analysis")]
+        RD[("Redis :6379\ntraceId → incidentId\nResponse cache")]
+    end
+
+    subgraph OBS["📊 Observability"]
+        PR["Prometheus :9090"]
+        GR["Grafana :3000\nAuto-provisioned dashboard"]
+        JA["Jaeger :16686\nDistributed traces"]
+    end
+
+    subgraph PRES["🖥️ Presentation Layer"]
+        DB["dashboard-backend :8086\nREST API · Redis cache\nSSE stream · Circuit breaker\nJPA Specification filters"]
+        FE["React Frontend :5173\nIncidents · Detail · Services\nDark mode · Real-time SSE"]
+    end
+
+    EXT["🤖 LLM Provider\nGroq · Claude · DeepSeek\nOpenRouter"]
+
+    CS -->|"POST /logs"| IS
+    PS -->|"POST /logs + /metrics"| IS
+    IS --> LT & MT & TT
+    LT & MT & TT --> IE
+    IE -->|write| PG
+    IE <-->|"dedup cache"| RD
+    IE -->|"IncidentEvent"| IT
+    IE -->|"POST webhook"| WH["Slack / Teams\nWebhook"]
+    IT --> AI
+    AI -->|"write analysis"| PG
+    AI <-->|"chat completions"| EXT
+    PG --> DB
+    RD --> DB
+    DB -->|"REST + SSE push"| FE
+    IE & AI & DB & IS -->|"Micrometer metrics"| PR
+    PR --> GR
+    CS & PS -->|"OTel traces"| JA
 ```
 
-### Data Flow
+---
 
+## Data Flow
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant CS as checkout-service
+    participant PS as payment-service
+    participant IS as ingestion-service
+    participant K as Kafka
+    participant IE as incident-engine
+    participant R as Redis
+    participant PG as PostgreSQL
+    participant AI as ai-analysis-service
+    participant LLM as LLM Provider
+    participant FE as React Frontend
+
+    CS->>PS: GET /payment (OTel propagates traceId)
+    PS-->>CS: 500 — DATABASE_TIMEOUT
+
+    par Log forwarding
+        CS->>IS: POST /logs (ERROR, traceId=abc123)
+    and
+        PS->>IS: POST /logs (ERROR, traceId=abc123)
+        PS->>IS: POST /metrics (payment.success.rate=0)
+    end
+
+    IS->>K: EnrichedEvent → logs-topic (key=traceId)
+
+    K->>IE: consume EnrichedEvent
+    IE->>R: GET trace:abc123
+    R-->>IE: MISS (new trace)
+    IE->>R: GET dedup:payment-service:fp-xxx
+    R-->>IE: MISS (not duplicate)
+    IE->>PG: INSERT incident (OPEN, MEDIUM)
+    IE->>R: SET trace:abc123 = INCIDENT-abc (TTL 5min)
+    IE->>K: IncidentEvent → incidents-topic
+    Note over IE: Second error on same trace → severity HIGH → Slack webhook fires
+
+    K->>AI: consume IncidentEvent
+    AI->>PG: SELECT incident_events WHERE incident_id=?
+    AI->>LLM: POST /chat/completions (structured prompt)
+    LLM-->>AI: {"summary":...,"probableCause":...,"remediation":...}
+    AI->>PG: INSERT ai_analysis
+
+    FE-->>FE: SSE event received → invalidate React Query cache
+    FE->>IE: GET /incidents?severity=HIGH (filter)
+    IE->>PG: SELECT via JPA Specification
+    PG-->>IE: incidents + analysis
+    IE-->>FE: IncidentDetailDto (< 2s from incident creation)
 ```
-1. Simulation services call each other over HTTP with OpenTelemetry auto-instrumentation
-   → same traceId propagated via W3C TraceContext headers
-
-2. On each log/error event, LogForwarder POSTs a JSON payload to ingestion-service
-
-3. ingestion-service enriches the event (adds host, ingestionSource, timestamp)
-   → publishes EnrichedEvent to the appropriate Kafka topic
-
-4. incident-engine consumes events, looks up traceId in Redis:
-   - HIT  → event belongs to existing incident → append event record, update severity
-   - MISS → new incident → generate INCIDENT-{traceIdPrefix} → write to Redis + DB
-
-5. When an incident is created/updated, incident-engine publishes IncidentEvent
-   to incidents-topic
-
-6. ai-analysis-service consumes IncidentEvent:
-   - Aggregates all incident_events from DB for context
-   - Builds structured prompt with event timeline
-   - Calls active LLM provider (Groq / Claude / DeepSeek / OpenRouter)
-   - Parses JSON response: { summary, probableCause, remediation }
-   - Persists AiAnalysis record, publishes to ai-analysis-topic
-
-7. dashboard-backend serves REST API, reading incidents + analysis from PostgreSQL
-   with Redis-backed response caching
-
-8. React frontend polls every 30s, renders incident list, detail view, service health
-```
-
-### Technology Choices
-
-| Concern | Choice | Reason |
-|---|---|---|
-| Event bus | Kafka (KRaft) | Durable, replayable, fan-out to multiple consumers |
-| Correlation cache | Redis | Sub-millisecond traceId lookup, TTL-based expiry |
-| Storage | PostgreSQL | ACID for incident state, queryable for dashboard |
-| Tracing | OpenTelemetry + Jaeger | Standard, auto-instruments Spring Boot HTTP calls |
-| AI | Pluggable strategy | Swap providers without code changes |
-| Frontend | React + Tanstack Query | Real-time polling, typed API client |
 
 ---
 
@@ -193,84 +186,50 @@ The dashboard auto-polls every 30 seconds. New incidents appear with AI analysis
 
 ### 1. Simulation Services
 
-Both services are Spring Boot apps instrumented with the OpenTelemetry Java agent. They simulate realistic failure scenarios.
+Both services are Spring Boot apps instrumented with the OpenTelemetry Java agent, propagating trace IDs via W3C TraceContext headers.
 
-**checkout-service (:8081)**
+**payment-service (:8082)** — 5 weighted failure scenarios:
 
-```
-CheckoutController
-  └── POST /checkout
-        ├── calls payment-service GET /payment via RestTemplate
-        │     • success (70%) → logForwarder.sendInfo(...)
-        │     • failure (30%) → logForwarder.sendError("Payment call failed: 500 ...")
-        └── returns checkout result
+| Scenario | Probability | Latency |
+|---|---|---|
+| SUCCESS | 65% | 80–300ms |
+| DATABASE_TIMEOUT | 15% | 1.2–4.5s |
+| PAYMENT_GATEWAY_UNAVAILABLE | 8% | 1.2–4.5s |
+| FRAUD_DETECTION_TRIGGERED | 7% | 1.2–4.5s |
+| IDEMPOTENCY_KEY_CONFLICT | 5% | 1.2–4.5s |
 
-LogForwarder
-  └── send(service, severity, message)
-        • reads current OTel Span → extracts traceId
-        • builds JSON string manually (avoids RestTemplate Map serialization bug)
-        • POST to ingestion-service /logs with Content-Type: application/json
-```
+The bimodal latency distribution (80–300ms vs 1200–4500ms) produces a clear p50/p95 split in Grafana.
 
-**payment-service (:8082)**
+**checkout-service (:8081)** — calls payment-service, logs orderId + amount + product + elapsed on every request. Auto-triggers every 30s in Docker via `@Scheduled(fixedDelayString)`. Also exposes `POST /checkout` for manual testing with custom orderId/amount.
 
-```
-PaymentController
-  └── GET /payment
-        ├── success (70%) → logForwarder.sendInfo("Payment processed")
-        └── failure (30%) → logForwarder.sendError("Database timeout")
-                          → throw 500 error (propagates to checkout-service)
-```
-
-Both services are containerized with the OTel agent mounted as a volume:
-```
-JAVA_TOOL_OPTIONS=-javaagent:/app/opentelemetry-javaagent.jar
-OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318
-```
+Both services forward logs and metrics to ingestion-service via `LogForwarder` — a lightweight HTTP client that extracts the current OTel `traceId` before sending.
 
 ---
 
 ### 2. Ingestion Service (:8085)
 
-Single responsibility: accept raw telemetry over HTTP, enrich it, and publish to Kafka.
+Single responsibility: accept raw telemetry, enrich it, publish to Kafka.
 
 ```
-Controllers (4)
-  POST /logs    → LogController    ─┐
-  POST /metrics → MetricController  ├─► EnrichmentService → KafkaTemplate → topic
-  POST /traces  → TraceController   │
-  POST /events  → EventController  ─┘
-
-EnrichmentService
-  └── enriches raw payload into EnrichedEvent:
-        • eventType  (LOG_EVENT / METRIC_EVENT / TRACE_EVENT)
-        • service
-        • severity
-        • traceId
-        • message
-        • originalTimestamp (from payload)
-        • ingestionTimestamp (System.currentTimeMillis())
-        • ingestionSource   (e.g. "http-log")
-        • host              (from payload or "unknown")
-
-KafkaProducerConfig
-  └── explicit KafkaTemplate<String, EnrichedEvent> bean
-        • key   = traceId (ensures ordering per trace)
-        • value = EnrichedEvent (JSON, no type headers)
+POST /logs    → LogController    ─┐
+POST /metrics → MetricController  ├─► IngestionService → KafkaTemplate → topic
+POST /traces  → TraceController   │
+POST /events  → EventController  ─┘
 ```
 
-**EnrichedEvent schema (Kafka message value):**
+Rate-limited at **1,000 req/s** via Resilience4j (`limit-for-period: 1000, limit-refresh-period: 1s`). Exceeding the limit returns HTTP 429.
+
+**EnrichedEvent published to Kafka:**
 ```json
 {
   "eventType": "LOG_EVENT",
   "service": "payment-service",
   "severity": "ERROR",
   "traceId": "340c4e0c0b292992f589d70a05b7e21c",
-  "message": "Database timeout",
+  "message": "[DATABASE_TIMEOUT] Connection pool exhausted (elapsed=3241ms)",
   "originalTimestamp": 1781421051,
   "ingestionTimestamp": 1781421052435,
-  "ingestionSource": "http-log",
-  "host": "unknown"
+  "ingestionSource": "http-log"
 }
 ```
 
@@ -278,217 +237,160 @@ KafkaProducerConfig
 
 ### 3. Incident Engine (:8083)
 
-Stateful correlation service. Converts raw event streams into incidents.
+Stateful correlation service — converts raw event streams into grouped incidents.
 
 ```
-IncidentEventListener
+EnrichedEventListener
   @KafkaListener(topics = [logs-topic, metrics-topic, traces-topic])
-  └── onEvent(EnrichedEvent)
-        └── CorrelationService.correlate(event)
-
-CorrelationService
-  └── correlate(event):
-        1. Validate traceId (reject "unknown" / blank)
-        2. Redis GET "trace:{traceId}"
-           HIT  → incidentId = cached value
-                → load Incident from DB
-                → update severity if escalating (LOW < MEDIUM < HIGH)
-                → append IncidentEventRecord
-                → save incident + event record
-           MISS → generate incidentId = "INCIDENT-" + traceId.substring(0,6)
-                → DeduplicationService checks DB (second guard)
-                → create new Incident (status=OPEN)
-                → Redis SET "trace:{traceId}" = incidentId (TTL: 5 min)
-                → save Incident + IncidentEventRecord
-                → publish IncidentEvent to incidents-topic
-                → publish to alerts-topic
-
-DeduplicationService
-  └── Redis-backed idempotency guard (prevents duplicate incidents on replay)
-
-IncidentEventRecord (saved per correlated event):
-  incidentId, service, severity, traceId, message,
-  originalTimestamp, receivedAt, ingestionSource, host
+  └── CorrelationService.process(event)
+        1. Gate: ERROR severity only
+        2. Redis GET trace:{traceId}
+           HIT  → attach to existing incident (escalate to HIGH if 2+ services)
+           MISS → Redis GET dedup:{service}:{fingerprint}
+                  HIT  → suppress duplicate (dedupSuppressed counter++)
+                  MISS → create new incident (OPEN, MEDIUM)
+                       → Redis SET trace + dedup keys (TTL 5min)
+                       → publish to incidents-topic
+                       → fire Slack webhook (configurable via ROOTLENS_ALERT_WEBHOOK_URL)
 ```
 
-**Incident severity escalation:**
+**Incident FSM** — guarded by `IncidentStatus.canTransitionTo()`:
 ```
-LOW → MEDIUM → HIGH   (never downgrades)
+OPEN → INVESTIGATING → RESOLVED   (invalid transitions return HTTP 400)
 ```
 
-**Consumer group:** `incident-engine-group`  
-**Error handling:** `DefaultErrorHandler` with `FixedBackOff(1000ms, 3 retries)` + DLT
+**Micrometer counters:** `rootlens.incidents.created`, `rootlens.events.correlated`, `rootlens.incidents.dedup.suppressed`
 
 ---
 
 ### 4. AI Analysis Service (:8084)
 
-Pluggable LLM orchestration service. Consumes incident events and produces structured root cause analysis.
+Pluggable LLM orchestration — consumes incident events, produces structured root cause analysis.
 
 ```
 IncidentEventListener
   @KafkaListener(topic = incidents-topic)
-  └── onIncident(IncidentEvent)
-        └── AiAnalysisOrchestrator.analyze(event)
-
-AiAnalysisOrchestrator
-  └── analyze(incident):
-        1. Idempotency check (AiAnalysisRepository.findByIncidentId)
-        2. Aggregate context: SELECT * FROM incident_events WHERE incident_id = ?
+  └── AiAnalysisOrchestrator.analyze(event)
+        1. Idempotency check (skip if already analyzed)
+        2. Aggregate all incident_events from DB
         3. PromptBuilderService.buildUserMessage(incident, events)
-        4. LlmAnalysisProvider.analyze(systemPrompt, userMessage)  ← strategy pattern
-        5. Parse JSON response: { summary, probableCause, remediation }
-        6. Persist AiAnalysis entity
-        7. AiAnalysisPublisherService.publish(analysis) → ai-analysis-topic
-
-LlmAnalysisProvider  (interface)
-  ├── ClaudeAnalysisService    → Anthropic Java SDK (claude-sonnet-4-6)
-  └── OpenAiCompatibleProvider → RestClient to OpenAI-compatible APIs
-        ├── Groq     (https://api.groq.com/openai/v1)     llama-3.3-70b-versatile
-        ├── DeepSeek (https://api.deepseek.com/v1)        deepseek-chat
-        └── OpenRouter (https://openrouter.ai/api/v1)     meta-llama/llama-3.1-8b-instruct:free
-
-LlmProviderConfig
-  └── reads AI_PROVIDER env var → instantiates correct strategy bean
-
-PromptBuilderService
-  └── SYSTEM_PROMPT: instructs model to respond with JSON only:
-        { "summary": "...", "probableCause": "...", "remediation": "..." }
-  └── userMessage: incident severity + services + timeline of events with timestamps
+        4. circuitBreaker.executeSupplier(() → llmProvider.analyze(...))
+        5. Parse JSON: { summary, probableCause, remediation }
+        6. Persist AiAnalysis, publish to ai-analysis-topic
 ```
 
-**LLM response contract (expected JSON):**
-```json
-{
-  "summary": "One paragraph describing what happened",
-  "probableCause": "Root cause explanation",
-  "remediation": "Actionable steps to resolve and prevent recurrence"
-}
-```
+**LLM Strategy Pattern:**
 
-**Consumer group:** `ai-analysis-group`  
-**Error handling:** LLM failures caught in orchestrator, stored as `success=false` analysis (no DLT noise)
+| Provider | Model | API |
+|---|---|---|
+| Groq | `llama-3.3-70b-versatile` | OpenAI-compatible |
+| Claude | `claude-sonnet-4-6` | Anthropic SDK |
+| DeepSeek | `deepseek-chat` | OpenAI-compatible |
+| OpenRouter | `meta-llama/llama-3.1-8b-instruct:free` | OpenAI-compatible |
+
+Circuit breaker on all LLM calls — open state 30s, prevents cascading timeouts reaching the incident pipeline. LLM failures stored as `success=false` (no DLT noise).
+
+**Micrometer timer:** `rootlens.analysis.latency` — visible as p50/p95 in Grafana.
 
 ---
 
 ### 5. Dashboard Backend (:8086)
 
-Read-only REST API with Redis caching. No business logic — aggregates data from PostgreSQL for the frontend.
+REST API layer with Redis caching, SSE push, and JPA Specification filtering.
 
 ```
-REST Endpoints:
-  GET  /incidents?page=0&size=20     → paginated IncidentSummaryDto list
-  GET  /incidents/{id}               → IncidentDetailDto (events + analysis inline)
-  GET  /incidents/{id}/analysis      → AnalysisDto only
-  GET  /services                     → ServiceHealthDto list
-
-IncidentDetailDto:
-  incidentId, status, severity, servicesImpacted, traceIds,
-  createdAt, updatedAt,
-  events: [ { service, severity, traceId, message, originalTimestamp, receivedAt } ],
-  analysis: { summary, probableCause, remediation, model, analysisTimestamp, success }
-
-ServiceHealthDto:
-  name, activeIncidents, highestSeverity, lastEventAt
-
-Caching:
-  @Cacheable("incidents")  → Redis, TTL 30s
-  @Cacheable("services")   → Redis, TTL 30s
-  CORS: allowedOrigins("*") for local dev
+GET  /incidents?page=0&size=20&severity=HIGH&status=OPEN&service=payment
+GET  /incidents/{id}
+GET  /incidents/stream          ← SSE push (text/event-stream)
+PATCH /incidents/{id}/status    ← FSM-guarded status transition
+GET  /services
+GET  /incidents/{id}/analysis
 ```
+
+- **Caching** — `@Cacheable` on list + detail queries, cache keys include all filter params. Evicted on Kafka-driven SSE broadcast.
+- **SSE registry** — `CopyOnWriteArrayList<SseEmitter>` broadcasts raw JSON to all connected clients on every Kafka incident event.
+- **Filter** — `JpaSpecificationExecutor` + `IncidentSpecification.withFilters(severity, status, service)` for composable server-side filtering.
+- **OpenAPI** — Swagger UI at `/swagger-ui.html`
 
 ---
 
 ### 6. React Frontend (:5173)
 
-Three-page SPA. Polls the dashboard backend every 30 seconds.
+Three-page SPA with real-time updates, dark mode, and server-side filtering.
 
 ```
 src/
-├── api/client.ts          fetchIncidents(page, size)
-│                          fetchIncidentDetail(id)
-│                          fetchServices()
-├── types/index.ts         IncidentSummary, IncidentDetail, Analysis, ServiceHealth
+├── api/client.ts               fetchIncidents(page, size, filters)
+│                               updateIncidentStatus(id, status)
+│                               createIncidentStream(onUpdate)   ← SSE
+├── context/ThemeContext.tsx    dark/light toggle, localStorage persistence
 ├── pages/
-│   ├── IncidentsPage.tsx  paginated table, severity + status badges, AI indicator
-│   ├── IncidentDetailPage.tsx  event timeline + AI analysis card
-│   └── ServicesPage.tsx   service health card grid
+│   ├── IncidentsPage.tsx       filter bar (severity/status/service) + paginated table
+│   ├── IncidentDetailPage.tsx  event timeline + AI analysis card + status transition
+│   └── ServicesPage.tsx        service health cards
 └── components/
-    ├── Navbar.tsx          brand + nav links + last-updated counter
-    ├── SeverityBadge.tsx   HIGH=red, MEDIUM=orange, LOW=gray
-    └── StatusBadge.tsx     OPEN=blue, INVESTIGATING=yellow, RESOLVED=green
-
-Stack: Vite + React 19 + TypeScript + Tailwind CSS v4 + shadcn/ui
-Query: @tanstack/react-query  refetchInterval: 30_000  staleTime: 0
-Routing: react-router-dom v7
+    ├── Navbar.tsx              dark mode toggle (Sun/Moon)
+    ├── SeverityBadge.tsx       HIGH=red · MEDIUM=orange · LOW=gray
+    └── StatusBadge.tsx         OPEN=blue · INVESTIGATING=yellow · RESOLVED=green
 ```
+
+**Stack:** Vite + React 19 + TypeScript + Tailwind CSS v4 + shadcn/ui + `@tanstack/react-query` + `react-router-dom` v7
+
+Incident detection latency: **<2s** from error occurrence (SSE push replaces 30s polling).
 
 ---
 
 ## Kafka Topics
 
-| Topic | Producer | Consumer(s) | Message Type |
+| Topic | Producer | Consumer | Message Type |
 |---|---|---|---|
 | `logs-topic` | ingestion-service | incident-engine | `EnrichedEvent` |
 | `metrics-topic` | ingestion-service | incident-engine | `EnrichedEvent` |
 | `traces-topic` | ingestion-service | incident-engine | `EnrichedEvent` |
 | `incidents-topic` | incident-engine | ai-analysis-service | `IncidentEvent` |
-| `alerts-topic` | incident-engine | *(future alerting)* | `IncidentEvent` |
-| `ai-analysis-topic` | ai-analysis-service | *(future consumers)* | `AiAnalysisEvent` |
-| `incidents-topic.DLT` | Spring Kafka error handler | *(manual review)* | raw bytes |
+| `alerts-topic` | incident-engine | *(future)* | `IncidentEvent` |
+| `ai-analysis-topic` | ai-analysis-service | *(future)* | `AiAnalysisEvent` |
+| `incidents-topic.DLT` | Spring Kafka error handler | manual review | raw bytes |
 
-**Consumer groups:**
-- `incident-engine-group` → subscribes to logs/metrics/traces topics
-- `ai-analysis-group` → subscribes to incidents-topic
-
-**Kafka config (KRaft single-broker):**
-```yaml
-KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
-KAFKA_MIN_INSYNC_REPLICAS: 1
-```
+**Consumer groups:** `incident-engine-group` · `ai-analysis-group`
 
 ---
 
 ## Database Schema
 
 ```sql
--- Incidents created by incident-engine
 CREATE TABLE incidents (
     id                VARCHAR(50) PRIMARY KEY,   -- "INCIDENT-{traceIdPrefix}"
-    status            VARCHAR(30) NOT NULL,       -- OPEN | INVESTIGATING | RESOLVED
+    status            VARCHAR(30) NOT NULL        -- OPEN | INVESTIGATING | RESOLVED
+                      CHECK (status IN ('OPEN','INVESTIGATING','RESOLVED')),
     severity          VARCHAR(20) NOT NULL,       -- LOW | MEDIUM | HIGH
-    services_impacted TEXT,                       -- JSON array, stored as string
-    trace_ids         TEXT,                       -- JSON array, stored as string
-    created_at        BIGINT NOT NULL,            -- epoch ms
+    services_impacted TEXT,                       -- JSON array as string
+    trace_ids         TEXT,
+    created_at        BIGINT NOT NULL,
     updated_at        BIGINT NOT NULL
 );
 
--- Individual events correlated to each incident
 CREATE TABLE incident_events (
     id                 BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
-    incident_id        VARCHAR(50) NOT NULL,      -- FK → incidents.id
+    incident_id        VARCHAR(50) NOT NULL REFERENCES incidents(id),
     service            VARCHAR(100),
     severity           VARCHAR(20),
     trace_id           VARCHAR(64),
     message            TEXT,
-    original_timestamp BIGINT,                    -- epoch seconds (from source)
-    received_at        BIGINT,                    -- epoch ms (ingestion time)
-    ingestion_source   VARCHAR(50),
-    host               VARCHAR(100)
+    original_timestamp BIGINT,
+    received_at        BIGINT
 );
 
--- AI analysis result per incident
 CREATE TABLE ai_analysis (
     id                 VARCHAR(100) PRIMARY KEY,  -- "ANALYSIS-{incidentId}"
     incident_id        VARCHAR(50) NOT NULL UNIQUE,
     summary            TEXT,
     probable_cause     TEXT,
     remediation        TEXT,
-    model              VARCHAR(100),              -- e.g. "Groq/llama-3.3-70b-versatile"
-    analysis_timestamp BIGINT,                    -- epoch ms
+    model              VARCHAR(100),
+    analysis_timestamp BIGINT,
     success            BOOLEAN,
-    raw_response       TEXT                       -- full LLM output for debugging
+    raw_response       TEXT
 );
 ```
 
@@ -498,97 +400,65 @@ CREATE TABLE ai_analysis (
 
 ### GET /incidents
 
-Returns paginated list of incidents.
+```
+GET /incidents?page=0&size=20&severity=HIGH&status=OPEN&service=payment-service
+```
 
-**Query params:** `page` (default 0), `size` (default 20)
+| Param | Type | Default | Description |
+|---|---|---|---|
+| `page` | int | 0 | Page number |
+| `size` | int | 20 | Page size |
+| `severity` | string | — | Filter: HIGH / MEDIUM / LOW |
+| `status` | string | — | Filter: OPEN / INVESTIGATING / RESOLVED |
+| `service` | string | — | Filter: partial service name match |
 
 ```json
 {
-  "content": [
-    {
-      "incidentId": "INCIDENT-ecaff5",
-      "status": "OPEN",
-      "severity": "HIGH",
-      "servicesImpacted": ["payment-service", "checkout-service"],
-      "createdAt": 1781421052435,
-      "updatedAt": 1781421052738,
-      "hasAnalysis": true
-    }
-  ],
-  "page": 0,
-  "size": 20,
-  "totalElements": 2,
-  "totalPages": 1
+  "content": [{
+    "incidentId": "INCIDENT-ecaff5",
+    "status": "OPEN",
+    "severity": "HIGH",
+    "servicesImpacted": ["payment-service", "checkout-service"],
+    "createdAt": 1781421052435,
+    "hasAnalysis": true
+  }],
+  "page": 0, "size": 20, "totalElements": 42, "totalPages": 3
 }
 ```
 
 ### GET /incidents/{id}
 
-Returns full incident detail including correlated events and AI analysis.
+Returns full incident detail with correlated event timeline and AI analysis inline.
+
+### PATCH /incidents/{id}/status
+
+FSM-guarded status transition. Returns HTTP 400 on invalid transition.
 
 ```json
-{
-  "incidentId": "INCIDENT-ecaff5",
-  "status": "OPEN",
-  "severity": "HIGH",
-  "servicesImpacted": ["payment-service", "checkout-service"],
-  "traceIds": ["340c4e0c0b292992f589d70a05b7e21c"],
-  "createdAt": 1781421052435,
-  "updatedAt": 1781421052738,
-  "events": [
-    {
-      "service": "payment-service",
-      "severity": "ERROR",
-      "traceId": "340c4e0c0b292992f589d70a05b7e21c",
-      "message": "Database timeout",
-      "originalTimestamp": 1781421051,
-      "receivedAt": 1781421052572
-    },
-    {
-      "service": "checkout-service",
-      "severity": "ERROR",
-      "traceId": "340c4e0c0b292992f589d70a05b7e21c",
-      "message": "Payment call failed: 500",
-      "originalTimestamp": 1781421051,
-      "receivedAt": 1781421053340
-    }
-  ],
-  "analysis": {
-    "summary": "The payment-service experienced a database timeout which cascaded to checkout-service",
-    "probableCause": "Database connection or query issue with payment-service",
-    "remediation": "Investigate DB logs, increase connection pool size, add circuit breakers",
-    "model": "Groq/llama-3.3-70b-versatile",
-    "analysisTimestamp": 1781429029810,
-    "success": true
-  }
-}
+{ "status": "INVESTIGATING" }
+```
+
+Valid transitions: `OPEN → INVESTIGATING` · `OPEN → RESOLVED` · `INVESTIGATING → RESOLVED`
+
+### GET /incidents/stream
+
+Server-Sent Events stream. Fires `incident-update` event on every Kafka incident message.
+
+```javascript
+const es = new EventSource('http://localhost:8086/incidents/stream');
+es.addEventListener('incident-update', (e) => console.log(JSON.parse(e.data)));
 ```
 
 ### GET /services
 
-Returns per-service health aggregated from active incidents.
-
-```json
-{
-  "services": [
-    {
-      "name": "payment-service",
-      "activeIncidents": 2,
-      "highestSeverity": "HIGH",
-      "lastEventAt": 1781421053340
-    }
-  ]
-}
-```
+Per-service health aggregated from active (non-RESOLVED) incidents.
 
 ---
 
 ## LLM Provider Configuration
 
-Set environment variables before starting the stack:
-
 ```bash
-# Groq (free tier — recommended for development)
+# Groq — free tier, recommended for development
 export AI_PROVIDER=groq
 export GROQ_API_KEY=gsk_...
 
@@ -603,31 +473,30 @@ export DEEPSEEK_API_KEY=...
 # OpenRouter (has free models)
 export AI_PROVIDER=openrouter
 export OPENROUTER_API_KEY=sk-or-...
+
+# Optional: Slack/Teams webhook for HIGH severity alerts
+export ROOTLENS_ALERT_WEBHOOK_URL=https://hooks.slack.com/services/...
 ```
-
-Default models per provider:
-
-| Provider | Default Model |
-|---|---|
-| Groq | `llama-3.3-70b-versatile` |
-| Claude | `claude-sonnet-4-6` |
-| DeepSeek | `deepseek-chat` |
-| OpenRouter | `meta-llama/llama-3.1-8b-instruct:free` |
 
 ---
 
 ## Generating Incidents
 
-The checkout-service has a built-in 30% failure rate that triggers correlated errors across both services with the same OpenTelemetry trace ID.
+The checkout-service auto-triggers every 30 seconds in Docker (`ROOTLENS_SIMULATION_AUTO_TRIGGER_ENABLED=true`). For manual load:
 
 ```bash
-# Generate a batch of requests (produces ~3 incidents per 10 requests)
-for i in {1..10}; do curl -s http://localhost:8081/checkout; done
+# Trigger 10 checkout requests
+for i in {1..10}; do curl -s http://localhost:8081/checkout | jq .status; done
 
-# Watch incidents appear in real time
-watch -n 5 'curl -s http://localhost:8086/incidents | python3 -m json.tool | grep -E "incidentId|severity|hasAnalysis"'
+# POST with specific order
+curl -X POST http://localhost:8081/checkout \
+  -H 'Content-Type: application/json' \
+  -d '{"orderId":"test-001","amount":149.99}'
 
-# Reset consumer offset to re-analyze existing incidents with a different provider
+# Watch incidents appear
+watch -n 3 'curl -s "http://localhost:8086/incidents?severity=HIGH" | python3 -m json.tool | grep -E "incidentId|severity|hasAnalysis"'
+
+# Re-analyze existing incidents with a different provider
 docker compose stop ai-analysis-service
 docker exec kafka kafka-consumer-groups \
   --bootstrap-server localhost:9092 \
@@ -637,6 +506,6 @@ docker exec kafka kafka-consumer-groups \
 export AI_PROVIDER=groq GROQ_API_KEY=...
 docker compose up -d ai-analysis-service
 
-# View distributed traces in Jaeger
-open http://localhost:16686  # search for "checkout-service"
+# View distributed traces
+open http://localhost:16686  # search service: checkout-service
 ```

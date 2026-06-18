@@ -33,3 +33,7 @@ Thumbs.db
 # Logs
 *.log
 logs/
+
+# Editor temp files
+*.tmp
+*.tmp.*
